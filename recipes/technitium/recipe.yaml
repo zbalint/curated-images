@@ -1,0 +1,50 @@
+name: technitium
+description: >
+  Technitium DNS Server, compiled from source, running as the repo-wide fixed non-root
+  identity (65532:65532) on a distroless-equivalent base (Ubuntu Chiseled), with a
+  build-time NET_BIND_SERVICE file capability to bind port 53 without root, and
+  libmsquic included for DNS-over-QUIC feature parity with upstream's own image.
+  Adapted from prototype/technitium-hardened-build and prototype/technitium-distroless-
+  msquic; see those branches' READMEs for the full build/capability/distroless
+  investigation this recipe carries forward.
+
+upstream:
+  repository: https://github.com/TechnitiumSoftware/DnsServer.git
+  tracking:
+    mode: github_release
+    # DnsServer publishes formal GitHub Releases (not just tags), so the Releases API
+    # resolves the newest version directly. TechnitiumLibrary's own matching tag
+    # ("dns-server-<resolved_ref>") is derived inside the Dockerfile from this same
+    # resolved version -- see build.args below and the Dockerfile's own comment on why
+    # that derivation is safe (confirmed empirically for v15.5.1).
+
+image:
+  name: ghcr.io/<owner>/curated-technitium  # placeholder -- GHCR naming convention still
+                                             # open project-wide, see docs/ARCHITECTURE.md
+                                             # "Open questions"; not a per-recipe decision.
+  platforms:
+    - linux/amd64
+
+build:
+  dockerfile: Dockerfile
+  args:
+    DNS_SERVER_VERSION: "${resolved_ref}"
+
+runtime:
+  base: distroless
+  # mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled -- Microsoft's distroless-
+  # equivalent for .NET. Validated this session: setcap applied to the base's own
+  # dotnet binary in an intermediate stage (chiseled has no shell/apt/useradd of its
+  # own, so setcap/passwd-group/mkdir all happen in earlier full-Ubuntu-Noble stages
+  # and are copied across), functional under both runc and runsc. See
+  # prototype/technitium-distroless-msquic's README for the full investigation,
+  # including the COPY-of-an-empty-directory-drops-ownership gotcha found and fixed.
+  gvisor_tested: true
+  # Validated this session directly against this recipe's own built image (not a
+  # throwaway diagnostic listener, closing the item flagged when this recipe.yaml was
+  # first written): ran with --user 65532:65532 --cap-drop ALL --cap-add
+  # NET_BIND_SERVICE --read-only --tmpfs /tmp, a named Docker volume for /etc/dns, on a
+  # dedicated bridge network, under --runtime=runsc. Clean startup, no exceptions,
+  # dig against the published port returned a real answer, web console reachable
+  # (HTTP 200). Not yet reconfirmed on the actual ARM Radxa fleet hardware -- x86_64
+  # WSL2 dev box only, same caveat as the network-mode decision.
