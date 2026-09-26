@@ -161,6 +161,22 @@ jobs:
           trivy image --format cyclonedx --output "reports/sbom-${SLUG}.cdx.json" "$IMAGE_TAG"
           trivy image --scanners vuln --format json --output "reports/vulnerabilities-${SLUG}.json" "$IMAGE_TAG"
 
+      # Same unfiltered vuln data as reports/vulnerabilities-${SLUG}.json above, just
+      # rendered where a human actually looks first -- the run's own summary page --
+      # instead of only inside a downloadable artifact zip.
+      - name: Add vulnerability report to job summary
+        env:
+          IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          SLUG: ${{ matrix.recipe.platform_slug }}
+        run: |
+          {
+            echo "### Vulnerability report -- ${{ matrix.recipe.name }} (${SLUG})"
+            echo
+            echo '```'
+            trivy image --scanners vuln --format table "$IMAGE_TAG"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reports-${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
