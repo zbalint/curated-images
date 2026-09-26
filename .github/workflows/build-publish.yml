@@ -1,0 +1,175 @@
+name: Build, Scan, and Publish Recipes
+
+# Phase 2 CI mechanism (docs/ARCHITECTURE.md): generic and mechanical, runs against
+# every recipes/*/recipe.yaml. Discovers which recipes have a new upstream version,
+# builds+scans each locally on the runner, and only pushes to GHCR on a clean scan --
+# see docs/THREAT_MODEL.md for the digest-based promotion invariant this implements.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: curated-images-build-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+      has_work: ${{ steps.discover.outputs.has_work }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - run: pip install pyyaml
+
+      - id: discover
+        run: python3 scripts/discover_recipes.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Trivy/Dockle are installed at whatever's current each run, deliberately not
+      # pinned like the recipe's own upstream build inputs are (constraint 6) -- their
+      # entire value is scanning against an up-to-date vulnerability DB/ruleset, so
+      # pinning the scanner itself would work against the point of running it on a
+      # schedule.
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Install Dockle
+        run: |
+          DOCKLE_VERSION=$(curl -s https://api.github.com/repos/goodwithtech/dockle/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+          curl -sL -o /tmp/dockle.deb "https://github.com/goodwithtech/dockle/releases/download/v${DOCKLE_VERSION}/dockle_${DOCKLE_VERSION}_Linux-64bit.deb"
+          sudo dpkg -i /tmp/dockle.deb
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build local candidate (never pushed until scans pass)
+        run: |
+          build_args=()
+          while IFS='=' read -r kv; do
+            [ -n "$kv" ] && build_args+=(--build-arg "$kv")
+          done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< '${{ toJson(matrix.recipe.build_args) }}')
+          docker buildx build --load "${build_args[@]}" \
+            -f "${{ matrix.recipe.dockerfile }}" \
+            -t "local-candidate:${{ matrix.recipe.name }}" \
+            "${{ matrix.recipe.context }}"
+
+      # Tier 1 scanning (docs/THREAT_MODEL.md) -- both run against the local image
+      # directly, no push/pull round-trip. Thresholds calibrated against this recipe's
+      # actual first scan (2026-09-26): 0 CRITICAL/HIGH, 8 MEDIUM (unrelated glibc CVEs,
+      # some already fixed upstream, some not yet) -- 0 Dockle WARN/FATAL.
+      - name: Trivy scan (fails on CRITICAL/HIGH)
+        run: |
+          trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed \
+            "local-candidate:${{ matrix.recipe.name }}"
+
+      - name: Dockle scan (fails on WARN or worse)
+        run: |
+          dockle --exit-code 1 --exit-level WARN \
+            "local-candidate:${{ matrix.recipe.name }}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only reached if both scans above passed -- see the digest-based promotion
+      # invariant in docs/THREAT_MODEL.md: this is the one and only push.
+      - name: Push
+        id: push
+        run: |
+          target="${{ matrix.recipe.image_name }}:${{ matrix.recipe.resolved_ref }}"
+          docker tag "local-candidate:${{ matrix.recipe.name }}" "$target"
+          docker push "$target"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$target")"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # .state.json is machine-written only (docs/ARCHITECTURE.md) -- each matrix leg
+      # writes its own recipe's update as an artifact rather than committing directly,
+      # since concurrent matrix legs committing/pushing to the same branch would race.
+      # The update-state job below applies all of them in one place, sequentially.
+      - name: Write resolved state for this recipe
+        run: |
+          mkdir -p state-updates
+          jq -n \
+            --arg ref "${{ matrix.recipe.resolved_ref }}" \
+            --arg digest "${{ steps.push.outputs.digest }}" \
+            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{last_built_ref: $ref, last_built_digest: $digest, last_built_at: $at}' \
+            > "state-updates/${{ matrix.recipe.name }}.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: state-${{ matrix.recipe.name }}
+          path: state-updates/${{ matrix.recipe.name }}.json
+
+  update-state:
+    needs: [discover, build]
+    if: always() && needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # fail-fast: false on the build matrix means some recipes can succeed while
+      # others fail -- this job runs regardless (always()) and commits whichever
+      # .state.json updates actually exist as artifacts, matching "a failed build for
+      # one recipe never touches another recipe's already-promoted state."
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          pattern: state-*
+          path: state-updates
+          merge-multiple: true
+
+      - name: Apply state updates for whichever recipes actually succeeded
+        run: |
+          shopt -s nullglob
+          files=(state-updates/*.json)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no successful builds to record"
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            name="$(basename "$f" .json)"
+            cp "$f" "recipes/${name}/.state.json"
+            git add "recipes/${name}/.state.json"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update .state.json for rebuilt recipes"
+          git push
