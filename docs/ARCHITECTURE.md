@@ -49,10 +49,15 @@ below), but these three are treated as closed and are not being retroactively re
    never build against an untracked moving target. A recipe records *how* to find the
    latest version automatically (release/tag tracking preferred), not a version number
    that has to be bumped by hand.
-7. **Image tags mirror upstream's exact released version string.** A rebuild triggered
-   only by a base-image change (not an upstream version bump) needs a build-revision
-   suffix (e.g. `-r1`) so two different image contents never collide under one tag — the
-   exact suffix scheme is still open, see below.
+7. **Image tags mirror upstream's exact released version string, and are mutable.** A
+   rebuild triggered only by a base-image change (not an upstream version bump) reuses
+   the same tag and simply overwrites it — **no build-revision suffix**. Decided
+   2026-09-26: a tag was never the reproducibility guarantee here: `GITHUB_TOKEN`-signed
+   build provenance and the exact digest are. Anyone who genuinely needs "the same image
+   every time" pins the digest (`ghcr.io/<owner>/curated-technitium@sha256:...`), not the
+   tag — a tag overwrite is invisible to a digest pin. A suffix scheme would only protect
+   against a problem digest-pinning already solves, for a cost (bookkeeping, `.state.json`
+   complexity) with no compensating benefit.
 8. **Terminology discipline** (full detail in `docs/THREAT_MODEL.md`): "quarantine, staging,
    policy passed, promoted" — never "clean, safe, trusted." A pass means "no known
    CVE/secret/policy violation found," not a safety guarantee.
@@ -174,8 +179,11 @@ These aspects of the design are not yet finalized:
 
 - The full prototype-to-recipe graduation bar beyond "distroless attempted + gVisor
   tested."
-- The exact build-revision tag-suffix scheme for a same-upstream-version rebuild
-  (constraint 7).
 - The exact GHCR image-naming convention (`ghcr.io/<owner>/curated-<name>` is used as a
   placeholder above, not confirmed).
+- **GHCR package visibility**: a package pushed via `GITHUB_TOKEN` does not inherit the
+  source repo's public visibility automatically — it defaults to private regardless, and
+  someone has to manually flip it to public in that package's own Settings page (a
+  one-time, irreversible action per package). Action item for whoever runs the first
+  successful publish of each recipe, not something the pipeline can do for itself.
 - Whether and when to add automatic issue-filing on build failure.
