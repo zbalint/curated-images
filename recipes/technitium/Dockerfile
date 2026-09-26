@@ -59,7 +59,8 @@ RUN apt-get update \
 # (only per-file ownership inside it would; there's nothing inside it to carry).
 RUN mkdir -p /etc/dns
 
-# Collect the setcap tool and the shared libraries the runtime/capped stages need into
+# Collect the setcap and ldconfig tools and the shared libraries the runtime/capped
+# stages need into
 # one fixed, architecture-agnostic path. The Debian/Ubuntu multiarch directory these
 # packages actually install into (/usr/lib/x86_64-linux-gnu, /usr/lib/aarch64-linux-gnu,
 # ...) depends on the target platform this stage itself was built for -- since this
@@ -79,7 +80,8 @@ RUN multiarch="$(uname -m)-linux-gnu" \
     && cp -P "/usr/lib/${multiarch}/libmsquic.so.2"* /opt/curated-libs/ \
     && cp -P "/usr/lib/${multiarch}/libnuma.so.1"* /opt/curated-libs/ \
     && cp -P "/usr/lib/${multiarch}/libcap.so.2"* /opt/curated-libs/ \
-    && cp -P /usr/sbin/setcap /opt/curated-libs/setcap
+    && cp -P /usr/sbin/setcap /opt/curated-libs/setcap \
+    && cp -P /sbin/ldconfig.real /opt/curated-libs/ldconfig
 
 # ---- capped: applies setcap to THIS chiseled base's own dotnet binary in place, using
 # a temporarily-injected setcap tool (exec-form RUN needs no shell). Discarded stage --
@@ -109,10 +111,28 @@ COPY --from=capped /usr/share/dotnet/dotnet /usr/share/dotnet/dotnet
 
 # libmsquic + its one non-libc runtime dep (libcrypto/libssl are already present in
 # this chiseled base for ASP.NET's own TLS support -- verified, not copied again).
-# LD_LIBRARY_PATH, not the standard multiarch lib dir, for the same
-# architecture-independence reason as the collection step in the assets stage above.
-ENV LD_LIBRARY_PATH=/opt/curated-libs
+# Registered into a build-time ld.so.cache below rather than found via
+# LD_LIBRARY_PATH: dotnet carries a file capability (see the capped stage above),
+# which puts the process into glibc secure-execution mode at exec time -- and secure
+# mode strips LD_LIBRARY_PATH entirely, so a non-root capability-bearing process can
+# never rely on it. Confirmed with a getauxval(AT_SECURE)+dlopen repro under the same
+# non-root+capability conditions (AT_SECURE=1, LD_LIBRARY_PATH removed, load fails).
+# ld.so.cache is a build-time, root-written artifact the loader still honors in
+# secure-execution mode, so it keeps the same fixed, architecture-independent path
+# used above without needing to know the real multiarch dir name in this shell-less
+# stage.
 COPY --from=assets /opt/curated-libs/libmsquic.so.2* /opt/curated-libs/libnuma.so.1* /opt/curated-libs/
+
+# ldconfig.real is statically linked (confirmed via ldd), so it needs no shared
+# libraries of its own copied into this shell-less stage. -f/-C point it at a
+# self-contained config/cache pair instead of relying on /etc/ld.so.conf(.d), which
+# this chiseled base doesn't ship. Requires root to write /etc/ld.so.cache --
+# same reasoning as the capped stage's USER 0:0 above, regardless of what this base's
+# own default USER is.
+COPY --from=assets /opt/curated-libs/ldconfig /opt/curated-libs/ldconfig
+COPY rootfs/opt/curated-libs/ld.so.conf /opt/curated-libs/ld.so.conf
+USER 0:0
+RUN ["/opt/curated-libs/ldconfig", "-f", "/opt/curated-libs/ld.so.conf", "-C", "/etc/ld.so.cache"]
 
 # Fixed non-root identity (65532:65532, "nonroot") -- chiseled has no useradd, so
 # these are hand-authored minimal passwd/group files (root entry kept, no unused

@@ -144,10 +144,14 @@ jobs:
         run: |
           dockle --exit-code 1 --exit-level WARN "$IMAGE_TAG"
 
-      # Non-blocking Tier 1 reporting (docs/THREAT_MODEL.md): license scanning and an
-      # SBOM, for visibility -- no stated policy exists to gate a build on a specific
-      # license, so these are artifacts to look at, not a pass/fail check.
-      - name: Generate license report and SBOM (non-blocking)
+      # Non-blocking Tier 1 reporting (docs/THREAT_MODEL.md): license scanning, an
+      # SBOM, and a full unfiltered vulnerability report, for visibility -- no stated
+      # policy exists to gate a build on a specific license, and the blocking scan
+      # above deliberately filters to CRITICAL/HIGH-with-a-fix only, so these are
+      # artifacts to look at, not a pass/fail check. The unfiltered vuln report is
+      # what makes the --ignore-unfixed exemption actually reviewable by a human,
+      # rather than just asserted in docs/THREAT_MODEL.md with nothing backing it.
+      - name: Generate license report, SBOM, and full vulnerability report (non-blocking)
         env:
           IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
           SLUG: ${{ matrix.recipe.platform_slug }}
@@ -155,6 +159,7 @@ jobs:
           mkdir -p reports
           trivy image --scanners license --format json --output "reports/licenses-${SLUG}.json" "$IMAGE_TAG"
           trivy image --format cyclonedx --output "reports/sbom-${SLUG}.cdx.json" "$IMAGE_TAG"
+          trivy image --scanners vuln --format json --output "reports/vulnerabilities-${SLUG}.json" "$IMAGE_TAG"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
