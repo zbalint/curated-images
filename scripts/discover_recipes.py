@@ -128,20 +128,37 @@ def discover() -> list[dict]:
     return needs_rebuild
 
 
+def build_matrix(recipes: list[dict]) -> list[dict]:
+    """One entry per (recipe, platform) -- a multi-platform manifest can't be scanned
+    as a single local --load'd image, so each platform is built and scanned on its
+    own; the manifest is only assembled afterward, once every platform has passed
+    independently (see publish_manifest.py)."""
+    entries = []
+    for recipe in recipes:
+        for platform in recipe["platforms"]:
+            entry = dict(recipe)
+            entry["platform"] = platform
+            entry["platform_slug"] = platform.replace("/", "-")
+            entries.append(entry)
+    return entries
+
+
 def main() -> int:
     try:
-        matrix = discover()
+        recipes = discover()
     except (ValueError, urllib.error.HTTPError, subprocess.CalledProcessError) as exc:
         print(f"discovery failed: {exc}", file=sys.stderr)
         return 1
 
-    print(json.dumps(matrix, indent=2))
+    matrix = build_matrix(recipes)
+    print(json.dumps({"recipes": recipes, "build_matrix": matrix}, indent=2))
 
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
         with open(github_output, "a") as f:
-            f.write(f"matrix={json.dumps(matrix)}\n")
-            f.write(f"has_work={'true' if matrix else 'false'}\n")
+            f.write(f"recipes={json.dumps(recipes)}\n")
+            f.write(f"build_matrix={json.dumps(matrix)}\n")
+            f.write(f"has_work={'true' if recipes else 'false'}\n")
 
     return 0
 

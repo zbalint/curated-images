@@ -24,6 +24,16 @@ image:
                                              # "Open questions"; not a per-recipe decision.
   platforms:
     - linux/amd64
+    - linux/arm64
+    # arm64 because the real deployment target (zbalint's homelab DNS boards, Radxa
+    # Zero 3E, confirmed arm64 via their own apt config) runs Technitium in cluster
+    # mode today. Base image + libmsquic apt repo both confirmed to publish arm64
+    # variants (docker manifest inspect / apt Packages index, 2026-09-26) -- not yet
+    # validated with an actual end-to-end arm64 build+run: this dev box's
+    # userns-remap config is incompatible with --privileged, which blocks
+    # registering QEMU locally. The real validation is the first GitHub Actions run
+    # (standard runners, no userns-remap) or gVisor/network testing done directly on
+    # the actual Radxa boards later.
 
 build:
   dockerfile: Dockerfile
