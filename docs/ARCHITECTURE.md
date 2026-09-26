@@ -33,9 +33,11 @@ below), but these three are treated as closed and are not being retroactively re
    GitHub-hosted runners are used, for both building and scanning. Nothing in this
    pipeline runs anywhere outside GitHub Actions — whatever deploys these images is a
    pure consumer, not part of the pipeline.
-2. **Fixed non-root identity: UID:GID 65532:65532** (`curated` user, no home directory, no
-   login shell). This is the Google-distroless/gVisor `nonroot` convention UID and is a
-   repo-wide invariant, not a per-recipe configurable value.
+2. **Fixed non-root identity: UID:GID 65532:65532, username `nonroot`** (no home directory,
+   no login shell). This is the Google-distroless/gVisor `nonroot` convention — UID and
+   username both — and is a repo-wide invariant, not a per-recipe configurable value. A
+   distroless base already ships this exact account; other bases (e.g. `slim`) must create
+   it explicitly (`groupadd -g 65532 nonroot && useradd -u 65532 -g nonroot ... nonroot`).
 3. **Read-only root filesystem**, with explicit, narrow writable paths only (a tmpfs mount
    for `/tmp`, a volume for the application's own data directory).
 4. **Distroless by default, gVisor (`runsc`) tested by default**, for every new prototype
