@@ -75,11 +75,37 @@ round-trip needed for any of them.
 **Tier 1 — in place from the start:**
 
 - **Trivy** (Aqua Security) — CVE scanning (OS packages + language dependencies), secret
-  scanning, license scanning, and SBOM generation (SPDX/CycloneDX), all in one
-  actively-maintained tool with an official GitHub Action.
+  scanning, license scanning, and SBOM generation (CycloneDX), all in one
+  actively-maintained tool. The CLI is installed directly in the workflow (not via
+  `aquasecurity/trivy-action`), to minimize third-party GitHub Action trust surface for
+  a task this simple. Split into three separate invocations with different roles:
+  - **CVE scanning is the actual blocking gate**: `--scanners vuln --exit-code 1
+    --severity CRITICAL,HIGH --ignore-unfixed`. **`--ignore-unfixed` is a deliberate
+    policy, not an oversight**: an unfixed HIGH/CRITICAL (no vendor-published fix exists
+    for that package version yet, in *any* upstream) does not block publication; a fixed
+    one this recipe simply hasn't picked up yet does. Rationale: the alternative — block
+    on any unfixed HIGH/CRITICAL regardless — means a single unpatched CVE anywhere in a
+    base OS image (glibc, openssl, ...) could freeze *every* future rebuild of a recipe
+    indefinitely, with nothing this project's own maintenance could do about it, while
+    the previously-promoted image (already carrying the same base OS, likely the same
+    CVE) just goes stale. Trivy's CVE database also can't do reachability analysis — a
+    "CRITICAL, no fix" finding means "this vulnerable code exists in this binary," not
+    "this application's actual code path can reach it"; that judgment call is exactly
+    what a blanket blocking policy can't make and a human periodically reading the
+    (still-visible, non-blocking) scan output can. Revisit if this project's own added
+    packages (not the base image) are ever the source of an unfixed finding.
+  - **Secret scanning is a separate, unconditional gate**: `--scanners secret
+    --exit-code 1`, no severity filter and no `--ignore-unfixed` exemption — constraint
+    11 ("nothing secret is ever allowed inside an image") is a hard rule, not a
+    risk-tiered one.
+  - **License scanning and SBOM generation are non-blocking reporting artifacts**, not a
+    gate: no license policy is defined anywhere in this project (which licenses would be
+    unacceptable, for instance), so gating on one would be inventing an unstated policy.
+    Uploaded per-build as workflow artifacts for visibility instead.
 - **Dockle** — container policy linter: flags running as root, unnecessary exposed ports,
   SUID/SGID bits, missing HEALTHCHECK, and other CIS Docker Benchmark-style checks. Covers
   the "policy checks" category (root, capabilities, exposed ports) that Trivy doesn't.
+  Gate: `--exit-code 1 --exit-level WARN` (fails on WARN or FATAL).
 
 **Tier 2 — add once the Tier 1 pipeline is proven out:**
 

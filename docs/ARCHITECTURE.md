@@ -90,12 +90,22 @@ exists. One shared, reusable GitHub Actions workflow, not one file per recipe:
 
 - **Discovery job**: loops over every `recipes/*/recipe.yaml`, resolves each project's
   current upstream version per its `tracking.mode` (via the GitHub API — no image build
-  needed just to check), compares against that recipe's own `.state.json`
-  (`last_built_ref`, machine-written, never hand-edited), and produces a list of recipes
-  that need a rebuild this run.
-- **Build job**, matrixed over that list: `docker build` locally on the runner (image not
-  pushed yet) → scan the local image (Trivy + Dockle, see `docs/THREAT_MODEL.md`) → only on a
-  pass, push once to GHCR with the real version tag, and update `.state.json`.
+  needed just to check), and rebuilds a recipe if *either* that resolved version *or* a
+  hash of the recipe's own tracked files (`Dockerfile`, `recipe.yaml`, `rootfs/*`) differs
+  from what `.state.json` (machine-written, never hand-edited) last recorded — comparing
+  the upstream version alone would silently never rebuild a recipe-only fix (e.g. a
+  Dockerfile bug fix) whose upstream version hasn't moved. A manual `workflow_dispatch`
+  run also accepts a `force` input (`all`, or a comma-separated recipe name list) to
+  rebuild regardless of either check, for cases neither one catches on its own (e.g. only
+  the base image changed, with no tracked-file diff and no upstream version bump).
+- **Build job**, matrixed over that list *and* each recipe's declared platforms (one leg
+  per recipe-platform pair, since a multi-platform manifest can't be scanned as a single
+  locally-loaded image): `docker build` locally on the runner (image not pushed yet) →
+  scan the local single-platform image (Trivy + Dockle, see `docs/THREAT_MODEL.md`) →
+  only on a pass, push that platform under an arch-suffixed tag. A separate job then
+  assembles and pushes the real, multi-arch manifest tag for a recipe only once *every*
+  platform it declares has independently passed — a partial platform failure means no
+  manifest at all for that recipe this run, and `.state.json` is updated only then.
 - A failed build or failed scan means that recipe's job simply fails. Nothing gets pushed,
   and the previously-promoted image is untouched — see "When an upstream project changes
   and the build breaks" below.
@@ -120,9 +130,17 @@ upstream:
     #                    needs a `branch:` field, tracks HEAD
 
 image:
-  name: ghcr.io/<owner>/curated-mealie   # exact naming convention still open
+  name: ghcr.io/<owner>/curated-mealie   # ghcr.io/<owner>/curated-<name> confirmed as
+                                          # the actual convention (recipes/technitium
+                                          # uses ghcr.io/zbalint/curated-technitium);
+                                          # <owner> is a real value per repo, not a
+                                          # literal placeholder left in recipe.yaml
   platforms:
-    - linux/amd64
+    - linux/amd64                        # declare every platform this recipe actually
+                                          # needs; the CI mechanism builds and scans
+                                          # each declared platform independently and
+                                          # only assembles the multi-arch manifest once
+                                          # every one of them has passed (see below)
 
 build:
   dockerfile: Dockerfile
@@ -144,6 +162,7 @@ runtime:
 ```json
 {
   "last_built_ref": "v3.2.1",
+  "last_built_recipe_hash": "sha256 of every tracked file under this recipe's own directory",
   "last_built_digest": "sha256:...",
   "last_built_at": "2026-09-26T00:00:00Z"
 }
@@ -179,8 +198,16 @@ These aspects of the design are not yet finalized:
 
 - The full prototype-to-recipe graduation bar beyond "distroless attempted + gVisor
   tested."
-- The exact GHCR image-naming convention (`ghcr.io/<owner>/curated-<name>` is used as a
-  placeholder above, not confirmed).
+- **GHCR image-naming convention confirmed as `ghcr.io/<owner>/curated-<name>`**
+  (`recipes/technitium` uses `ghcr.io/zbalint/curated-technitium`) — but `<owner>` is a
+  real value each `recipe.yaml` must set, never left as a literal placeholder: an
+  unsubstituted `<owner>` string is not a valid Docker reference component, so a
+  `docker push` against it fails immediately (invalid reference format) rather than
+  just "not being public yet."
+- No rebuild trigger currently exists for a **base-image-only** change (the base image's
+  tag gets a new digest upstream, with no change to this recipe's own tracked files and
+  no upstream *application* version bump) — the `workflow_dispatch` `force` input covers
+  this manually, but nothing detects it automatically yet.
 - **GHCR package visibility**: a package pushed via `GITHUB_TOKEN` does not inherit the
   source repo's public visibility automatically — it defaults to private regardless, and
   someone has to manually flip it to public in that package's own Settings page (a

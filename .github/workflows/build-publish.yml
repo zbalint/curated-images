@@ -10,7 +10,15 @@ name: Build, Scan, and Publish Recipes
 on:
   schedule:
     - cron: "0 6 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: >
+          Force a rebuild even if nothing changed: "all", or a comma-separated list
+          of recipe names. Leave empty for normal discovery (only rebuild what
+          actually changed).
+        required: false
+        default: ""
 
 concurrency:
   group: curated-images-build-publish
@@ -41,6 +49,7 @@ jobs:
         run: python3 scripts/discover_recipes.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_REBUILD: ${{ github.event.inputs.force }}
 
   # One leg per (recipe, platform). Builds and scans a single-platform image (the only
   # kind buildx can --load locally) and, only on a clean scan, pushes it under an
@@ -85,16 +94,31 @@ jobs:
           curl -sL -o /tmp/dockle.deb "https://github.com/goodwithtech/dockle/releases/download/v${DOCKLE_VERSION}/dockle_${DOCKLE_VERSION}_Linux-64bit.deb"
           sudo dpkg -i /tmp/dockle.deb
 
+      # Every dynamic value here (especially matrix.recipe.resolved_ref, which
+      # ultimately comes from an upstream git tag/branch) is passed via env, never
+      # interpolated with ${{ }} directly into this script's text -- a `${{ }}`
+      # expression is substituted as literal text into the run block *before* the
+      # shell ever sees it, so an untrusted value containing shell metacharacters
+      # would execute as commands, not be treated as a quoted string. This job has
+      # packages: write, so that's a real risk, not a theoretical one. Every run:
+      # step in this workflow that touches matrix.recipe.* or discover's outputs
+      # follows the same rule.
       - name: Build local candidate for this platform (never pushed until scans pass)
+        env:
+          IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          DOCKERFILE: ${{ matrix.recipe.dockerfile }}
+          CONTEXT: ${{ matrix.recipe.context }}
+          PLATFORM: ${{ matrix.recipe.platform }}
+          BUILD_ARGS_JSON: ${{ toJson(matrix.recipe.build_args) }}
         run: |
           build_args=()
           while IFS='=' read -r kv; do
             [ -n "$kv" ] && build_args+=(--build-arg "$kv")
-          done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< '${{ toJson(matrix.recipe.build_args) }}')
-          docker buildx build --load --platform "${{ matrix.recipe.platform }}" "${build_args[@]}" \
-            -f "${{ matrix.recipe.dockerfile }}" \
-            -t "local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}" \
-            "${{ matrix.recipe.context }}"
+          done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$BUILD_ARGS_JSON")
+          docker buildx build --load --platform "$PLATFORM" "${build_args[@]}" \
+            -f "$DOCKERFILE" \
+            -t "$IMAGE_TAG" \
+            "$CONTEXT"
 
       # Tier 1 scanning (docs/THREAT_MODEL.md) -- against the local single-platform
       # image directly, no push/pull round-trip. Thresholds calibrated against this
@@ -102,15 +126,40 @@ jobs:
       # MEDIUM (unrelated glibc CVEs) -- 0 Dockle WARN/FATAL. Not yet independently
       # calibrated against an arm64 build of this same image (see recipe.yaml's own
       # note on the still-open arm64 end-to-end validation gap).
-      - name: Trivy scan (fails on CRITICAL/HIGH)
+      # Blocking gate. --ignore-unfixed policy documented in docs/THREAT_MODEL.md --
+      # an unfixed HIGH/CRITICAL (no vendor patch exists yet, so nothing we do
+      # changes it) does not block; a fixed one we simply haven't picked up yet
+      # does. Secrets are never ignored regardless of severity (constraint 11:
+      # nothing secret is ever allowed inside an image, no exceptions).
+      - name: Trivy scan (fails on CRITICAL/HIGH-with-a-fix, or any secret)
+        env:
+          IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
         run: |
-          trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed \
-            "local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}"
+          trivy image --scanners vuln --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed "$IMAGE_TAG"
+          trivy image --scanners secret --exit-code 1 "$IMAGE_TAG"
 
       - name: Dockle scan (fails on WARN or worse)
+        env:
+          IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
         run: |
-          dockle --exit-code 1 --exit-level WARN \
-            "local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}"
+          dockle --exit-code 1 --exit-level WARN "$IMAGE_TAG"
+
+      # Non-blocking Tier 1 reporting (docs/THREAT_MODEL.md): license scanning and an
+      # SBOM, for visibility -- no stated policy exists to gate a build on a specific
+      # license, so these are artifacts to look at, not a pass/fail check.
+      - name: Generate license report and SBOM (non-blocking)
+        env:
+          IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          SLUG: ${{ matrix.recipe.platform_slug }}
+        run: |
+          mkdir -p reports
+          trivy image --scanners license --format json --output "reports/licenses-${SLUG}.json" "$IMAGE_TAG"
+          trivy image --format cyclonedx --output "reports/sbom-${SLUG}.cdx.json" "$IMAGE_TAG"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          path: reports/
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -123,19 +172,25 @@ jobs:
       # not the recipe's real tag -- see the job comment above.
       - name: Push arch-suffixed image
         id: push
+        env:
+          SOURCE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          TARGET_TAG: ${{ matrix.recipe.image_name }}:${{ matrix.recipe.resolved_ref }}-${{ matrix.recipe.platform_slug }}
         run: |
-          target="${{ matrix.recipe.image_name }}:${{ matrix.recipe.resolved_ref }}-${{ matrix.recipe.platform_slug }}"
-          docker tag "local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}" "$target"
-          docker push "$target"
-          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$target")"
+          docker tag "$SOURCE_TAG" "$TARGET_TAG"
+          docker push "$TARGET_TAG"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$TARGET_TAG")"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Record this platform's result for the manifest job
+        env:
+          PLATFORM: ${{ matrix.recipe.platform }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          SLUG: ${{ matrix.recipe.platform_slug }}
         run: |
           mkdir -p platform-results
-          jq -n --arg platform "${{ matrix.recipe.platform }}" --arg digest "${{ steps.push.outputs.digest }}" \
+          jq -n --arg platform "$PLATFORM" --arg digest "$DIGEST" \
             '{platform: $platform, digest: $digest}' \
-            > "platform-results/${{ matrix.recipe.platform_slug }}.json"
+            > "platform-results/${SLUG}.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -169,12 +224,15 @@ jobs:
           merge-multiple: false
 
       - name: Assemble and push the manifest for each fully-passed recipe
+        env:
+          RECIPES_JSON: ${{ needs.discover.outputs.recipes }}
         run: |
           mkdir -p state-updates
-          echo '${{ needs.discover.outputs.recipes }}' > recipes.json
+          echo "$RECIPES_JSON" > recipes.json
           for recipe_json in $(jq -c '.[]' recipes.json); do
             name=$(jq -r '.name' <<< "$recipe_json")
             ref=$(jq -r '.resolved_ref' <<< "$recipe_json")
+            recipe_hash=$(jq -r '.recipe_hash' <<< "$recipe_json")
             image=$(jq -r '.image_name' <<< "$recipe_json")
             platforms=$(jq -r '.platforms[]' <<< "$recipe_json")
 
@@ -199,8 +257,8 @@ jobs:
             docker buildx imagetools create -t "$image:$ref" "${digests[@]}"
             manifest_digest=$(docker buildx imagetools inspect "$image:$ref" --format '{{json .Manifest}}' | jq -r '.digest')
 
-            jq -n --arg ref "$ref" --arg digest "$manifest_digest" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              '{last_built_ref: $ref, last_built_digest: $digest, last_built_at: $at}' \
+            jq -n --arg ref "$ref" --arg digest "$manifest_digest" --arg hash "$recipe_hash" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{last_built_ref: $ref, last_built_digest: $digest, last_built_recipe_hash: $hash, last_built_at: $at}' \
               > "state-updates/${name}.json"
           done
 

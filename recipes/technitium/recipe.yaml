@@ -19,21 +19,19 @@ upstream:
     # that derivation is safe (confirmed empirically for v15.5.1).
 
 image:
-  name: ghcr.io/<owner>/curated-technitium  # placeholder -- GHCR naming convention still
-                                             # open project-wide, see docs/ARCHITECTURE.md
-                                             # "Open questions"; not a per-recipe decision.
+  name: ghcr.io/zbalint/curated-technitium
   platforms:
     - linux/amd64
     - linux/arm64
-    # arm64 because the real deployment target (zbalint's homelab DNS boards, Radxa
-    # Zero 3E, confirmed arm64 via their own apt config) runs Technitium in cluster
-    # mode today. Base image + libmsquic apt repo both confirmed to publish arm64
-    # variants (docker manifest inspect / apt Packages index, 2026-09-26) -- not yet
+    # arm64 because a real known deployment target for Technitium is arm64 hardware
+    # (confirmed via that hardware's own apt config, 2026-09-26) already running
+    # Technitium today. Base image + libmsquic apt repo both confirmed to publish
+    # arm64 variants (docker manifest inspect / apt Packages index) -- not yet
     # validated with an actual end-to-end arm64 build+run: this dev box's
     # userns-remap config is incompatible with --privileged, which blocks
     # registering QEMU locally. The real validation is the first GitHub Actions run
-    # (standard runners, no userns-remap) or gVisor/network testing done directly on
-    # the actual Radxa boards later.
+    # (standard runners, no userns-remap) or testing directly on real arm64
+    # hardware later.
 
 build:
   dockerfile: Dockerfile

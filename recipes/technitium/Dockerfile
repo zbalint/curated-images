@@ -59,6 +59,28 @@ RUN apt-get update \
 # (only per-file ownership inside it would; there's nothing inside it to carry).
 RUN mkdir -p /etc/dns
 
+# Collect the setcap tool and the shared libraries the runtime/capped stages need into
+# one fixed, architecture-agnostic path. The Debian/Ubuntu multiarch directory these
+# packages actually install into (/usr/lib/x86_64-linux-gnu, /usr/lib/aarch64-linux-gnu,
+# ...) depends on the target platform this stage itself was built for -- since this
+# recipe is multi-arch (recipe.yaml), a path hardcoded to one architecture would only
+# work for that one architecture and silently fail COPY on every other one. Resolving
+# the real multiarch dir here (where a shell exists) and copying into a stable location
+# sidesteps needing to know or guess that name in any later stage. `cp -P` preserves the
+# *.so.N -> *.so.N.n.n symlinks as symlinks (not dereferenced), and the glob avoids
+# hardcoding an exact patch-version filename that an unrelated package bump could rename
+# out from under a literal COPY path.
+# uname -m already equals the Debian/Ubuntu multiarch triplet prefix for both
+# architectures this recipe declares (x86_64, aarch64) -- avoids depending on
+# dpkg-dev (not installed here) just for dpkg-architecture. Would need revisiting if
+# a non-"-linux-gnu" architecture (e.g. armhf's arm-linux-gnueabihf) is ever added.
+RUN multiarch="$(uname -m)-linux-gnu" \
+    && mkdir -p /opt/curated-libs \
+    && cp -P "/usr/lib/${multiarch}/libmsquic.so.2"* /opt/curated-libs/ \
+    && cp -P "/usr/lib/${multiarch}/libnuma.so.1"* /opt/curated-libs/ \
+    && cp -P "/usr/lib/${multiarch}/libcap.so.2"* /opt/curated-libs/ \
+    && cp -P /usr/sbin/setcap /opt/curated-libs/setcap
+
 # ---- capped: applies setcap to THIS chiseled base's own dotnet binary in place, using
 # a temporarily-injected setcap tool (exec-form RUN needs no shell). Discarded stage --
 # only /usr/share/dotnet/dotnet is copied out of it below, nothing else. Confirmed
@@ -73,9 +95,11 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled AS capped
 # RUN has to run as root regardless of what the base image itself defaults to.
 USER 0:0
 
-COPY --from=assets /usr/sbin/setcap /usr/sbin/setcap
-COPY --from=assets /usr/lib/x86_64-linux-gnu/libcap.so.2 /usr/lib/x86_64-linux-gnu/libcap.so.2.66 /usr/lib/x86_64-linux-gnu/
-RUN ["/usr/sbin/setcap", "cap_net_bind_service=+ep", "/usr/share/dotnet/dotnet"]
+# setcap itself needs libcap.so.2 at exec time; ENV (not a shell export) works here
+# even though this stage has no shell -- it's applied by the builder, not executed.
+ENV LD_LIBRARY_PATH=/opt/curated-libs
+COPY --from=assets /opt/curated-libs/setcap /opt/curated-libs/libcap.so.2* /opt/curated-libs/
+RUN ["/opt/curated-libs/setcap", "cap_net_bind_service=+ep", "/usr/share/dotnet/dotnet"]
 
 # ---- runtime ----
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled AS runtime
@@ -83,14 +107,12 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled AS runtime
 # The one file that carries the build-time capability forward.
 COPY --from=capped /usr/share/dotnet/dotnet /usr/share/dotnet/dotnet
 
-# libmsquic + its two non-libc runtime deps (libcrypto/libssl are already present in
+# libmsquic + its one non-libc runtime dep (libcrypto/libssl are already present in
 # this chiseled base for ASP.NET's own TLS support -- verified, not copied again).
-COPY --from=assets \
-    /usr/lib/x86_64-linux-gnu/libmsquic.so.2 \
-    /usr/lib/x86_64-linux-gnu/libmsquic.so.2.6.1 \
-    /usr/lib/x86_64-linux-gnu/libnuma.so.1 \
-    /usr/lib/x86_64-linux-gnu/libnuma.so.1.0.0 \
-    /usr/lib/x86_64-linux-gnu/
+# LD_LIBRARY_PATH, not the standard multiarch lib dir, for the same
+# architecture-independence reason as the collection step in the assets stage above.
+ENV LD_LIBRARY_PATH=/opt/curated-libs
+COPY --from=assets /opt/curated-libs/libmsquic.so.2* /opt/curated-libs/libnuma.so.1* /opt/curated-libs/
 
 # Fixed non-root identity (65532:65532, "nonroot") -- chiseled has no useradd, so
 # these are hand-authored minimal passwd/group files (root entry kept, no unused

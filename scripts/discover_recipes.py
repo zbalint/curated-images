@@ -2,17 +2,21 @@
 """Discovery step for the Phase 2 CI mechanism (docs/ARCHITECTURE.md).
 
 For every recipes/*/recipe.yaml: resolves the current upstream version per its
-tracking.mode, compares it against recipes/<name>/.state.json's last_built_ref
-(missing file == needs a build), and prints a JSON array of recipes that need
-rebuilding this run -- each entry carries everything the build job needs
-(dockerfile path, image name/platforms, build args with ${resolved_ref}
-substituted).
+tracking.mode, and rebuilds if either that version or the recipe's own tracked
+files (Dockerfile, recipe.yaml, rootfs/*) changed since recipes/<name>/.state.json
+was last written (missing file == needs a build). This second check exists so a
+recipe-only fix (e.g. a Dockerfile bug fix) triggers a rebuild even when upstream's
+version hasn't moved -- comparing resolved_ref alone would silently skip it forever.
+FORCE_REBUILD (env var, from the workflow's workflow_dispatch input) overrides both
+checks: "all" forces every recipe, or a comma-separated list of recipe names forces
+just those.
 
 Run standalone for local testing: python3 scripts/discover_recipes.py
-In CI, output is also written to $GITHUB_OUTPUT as `matrix=<json>` when that
-env var is set.
+In CI, output is also written to $GITHUB_OUTPUT (`recipes`, `build_matrix`,
+`has_work`) when $GITHUB_OUTPUT is set.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -94,14 +98,37 @@ def substitute_build_args(args: dict, resolved_ref: str) -> dict:
     return {k: v.replace("${resolved_ref}", resolved_ref) for k, v in (args or {}).items()}
 
 
-def last_built_ref(recipe_dir: Path) -> str | None:
+def load_state(recipe_dir: Path) -> dict:
     state_path = recipe_dir / ".state.json"
     if not state_path.exists():
-        return None
-    return json.loads(state_path.read_text()).get("last_built_ref")
+        return {}
+    return json.loads(state_path.read_text())
+
+
+def recipe_content_hash(recipe_dir: Path) -> str:
+    """Hash of every tracked file under this recipe's own directory (Dockerfile,
+    recipe.yaml, rootfs/*, ...) except .state.json itself. Changing any of these
+    with no upstream version bump must still trigger a rebuild -- comparing
+    resolved_ref alone would silently skip a recipe-only fix forever."""
+    hasher = hashlib.sha256()
+    for path in sorted(p for p in recipe_dir.rglob("*") if p.is_file() and p.name != ".state.json"):
+        hasher.update(str(path.relative_to(recipe_dir)).encode())
+        hasher.update(path.read_bytes())
+    return hasher.hexdigest()
+
+
+def parse_force(raw: str) -> tuple[bool, set[str]]:
+    raw = raw.strip().lower()
+    if not raw:
+        return False, set()
+    if raw == "all":
+        return True, set()
+    return False, {name.strip() for name in raw.split(",") if name.strip()}
 
 
 def discover() -> list[dict]:
+    force_all, force_names = parse_force(os.environ.get("FORCE_REBUILD", ""))
+
     needs_rebuild = []
     for recipe_yaml in sorted(REPO_ROOT.glob("recipes/*/recipe.yaml")):
         recipe_dir = recipe_yaml.parent
@@ -112,13 +139,21 @@ def discover() -> list[dict]:
         if resolver is None:
             raise ValueError(f"{recipe_yaml}: unknown tracking.mode {mode!r}")
         resolved_ref = resolver(upstream)
+        recipe_hash = recipe_content_hash(recipe_dir)
 
-        if resolved_ref == last_built_ref(recipe_dir):
+        state = load_state(recipe_dir)
+        unchanged = (
+            resolved_ref == state.get("last_built_ref")
+            and recipe_hash == state.get("last_built_recipe_hash")
+        )
+        forced = force_all or recipe["name"] in force_names
+        if unchanged and not forced:
             continue
 
         needs_rebuild.append({
             "name": recipe["name"],
             "resolved_ref": resolved_ref,
+            "recipe_hash": recipe_hash,
             "dockerfile": str((recipe_dir / recipe["build"]["dockerfile"]).relative_to(REPO_ROOT)),
             "context": str(recipe_dir.relative_to(REPO_ROOT)),
             "image_name": recipe["image"]["name"],
