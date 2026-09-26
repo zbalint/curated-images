@@ -20,6 +20,20 @@ upstream:
 
 image:
   name: ghcr.io/zbalint/curated-technitium
+  # Public-facing text for the OCI org.opencontainers.image.description label/
+  # annotation (GHCR's package page reads this) -- deliberately separate from this
+  # file's own top-level `description` above, which is written for someone reading
+  # this YAML (UID numbers, prototype-branch pointers) rather than a stranger on the
+  # package page. No CVE counts or image-size numbers here on purpose: both drift
+  # out of date the moment the vulnerability DB updates or either image changes,
+  # with nothing in this pipeline that re-publishes this label when that happens.
+  description: >-
+    Hardened, distroless build of Technitium DNS Server, compiled from source. Runs
+    fully non-root with a single NET_BIND_SERVICE capability instead of root, on
+    Ubuntu Chiseled with no shell or package manager at runtime. Full feature parity
+    with upstream, including DNS-over-QUIC (libmsquic). Multi-arch (amd64/arm64).
+    Trivy+Dockle scanned on every build -- see the workflow run's summary/artifacts
+    for the current report.
   platforms:
     - linux/amd64
     - linux/arm64

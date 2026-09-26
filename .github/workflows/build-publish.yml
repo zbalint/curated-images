@@ -110,12 +110,15 @@ jobs:
           CONTEXT: ${{ matrix.recipe.context }}
           PLATFORM: ${{ matrix.recipe.platform }}
           BUILD_ARGS_JSON: ${{ toJson(matrix.recipe.build_args) }}
+          IMAGE_DESCRIPTION: ${{ matrix.recipe.image_description }}
         run: |
           build_args=()
           while IFS='=' read -r kv; do
             [ -n "$kv" ] && build_args+=(--build-arg "$kv")
           done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$BUILD_ARGS_JSON")
-          docker buildx build --load --platform "$PLATFORM" "${build_args[@]}" \
+          label_args=()
+          [ -n "$IMAGE_DESCRIPTION" ] && label_args+=(--label "org.opencontainers.image.description=$IMAGE_DESCRIPTION")
+          docker buildx build --load --platform "$PLATFORM" "${build_args[@]}" "${label_args[@]}" \
             -f "$DOCKERFILE" \
             -t "$IMAGE_TAG" \
             "$CONTEXT"
@@ -274,6 +277,16 @@ jobs:
               continue
             fi
 
+            # NOT annotated with org.opencontainers.image.description here, despite
+            # imagetools create supporting --annotation "index:...": this repo's own
+            # published manifests are Docker manifest-list media type (confirmed via
+            # imagetools inspect --raw against the real ghcr.io/zbalint/curated-
+            # technitium:v15.5.1), which has no annotations field at all -- OCI index
+            # is a different, separate media type. imagetools create silently no-ops
+            # the flag rather than erroring when given Docker-mediatype sources. Making
+            # this actually work needs the per-platform push step below switched from
+            # plain `docker push` to a buildx-native OCI-mediatype push -- not done in
+            # this change, see the memory linked to this recipe's description work.
             echo "$name: all platforms passed, assembling manifest for $image:$ref"
             docker buildx imagetools create -t "$image:$ref" "${digests[@]}"
             manifest_digest=$(docker buildx imagetools inspect "$image:$ref" --format '{{json .Manifest}}' | jq -r '.digest')

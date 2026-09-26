@@ -157,6 +157,7 @@ def discover() -> list[dict]:
             "dockerfile": str((recipe_dir / recipe["build"]["dockerfile"]).relative_to(REPO_ROOT)),
             "context": str(recipe_dir.relative_to(REPO_ROOT)),
             "image_name": recipe["image"]["name"],
+            "image_description": recipe["image"].get("description", "").strip(),
             "platforms": recipe["image"].get("platforms", ["linux/amd64"]),
             "build_args": substitute_build_args(recipe["build"].get("args"), resolved_ref),
         })
