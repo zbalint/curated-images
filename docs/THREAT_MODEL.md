@@ -50,15 +50,23 @@ tag (`latest`, a version tag). The mechanism, now that build and scan both happe
 same GitHub Actions job (no separate external scanner — see `docs/ARCHITECTURE.md`):
 
 ```
-docker build -t local:candidate .          <- image exists only locally on the runner
+build one platform as a local OCI-layout dir   <- exists only locally on the runner
         |
-Trivy + Dockle scan local:candidate        <- scans the local image directly, no push needed
+Trivy + Dockle scan that dir directly          <- no push needed to scan
         |
-   pass?  ──── no ──→ job fails, nothing is ever pushed, nothing public exists for this run
+   pass?  ──── no ──→ job fails for this platform, nothing is ever pushed for it
         |
        yes
         |
-docker push ghcr.io/.../<name>:<version>   <- the ONLY push, and only for a build that passed
+skopeo push, arch-suffixed tag                 <- never the recipe's real, user-facing tag
+        |
+   (every platform the recipe declares repeats the above independently)
+        |
+   every platform passed?  ──── no ──→ no manifest assembled, nothing new reaches GHCR
+        |
+       yes
+        |
+imagetools create -> the real multi-arch tag   <- assembled only from digests that already passed
 ```
 
 This avoids the race the original design was worried about (scanning `:latest`, then

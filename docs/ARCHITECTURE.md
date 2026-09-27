@@ -62,9 +62,12 @@ below), but these three are treated as closed and are not being retroactively re
    policy passed, promoted" — never "clean, safe, trusted." A pass means "no known
    CVE/secret/policy violation found," not a safety guarantee.
 9. **Promotion operates on the exact digest that was scanned, never a mutable tag.**
-   Mechanically: build locally on the runner (nothing pushed yet), scan the local image,
-   and only on a pass, push once, straight to the real tag. A failed scan means nothing
-   reaches GHCR for that run.
+   Mechanically: build each platform locally on the runner as an OCI-layout directory
+   (nothing pushed yet), scan it directly, and only on a pass, push that platform under
+   an arch-suffixed tag — never the recipe's real tag. Once every platform a recipe
+   declares has independently passed, a separate step assembles and pushes the real,
+   user-facing multi-arch manifest tag from those exact scanned digests. A failed scan on
+   any platform means no manifest for that recipe this run.
 10. **GHCR only, not Docker Hub.** `GITHUB_TOKEN` can push without a stored long-lived
     credential, there's no pull-rate-limiting for public images, and GitHub's build
     provenance attaches natively.

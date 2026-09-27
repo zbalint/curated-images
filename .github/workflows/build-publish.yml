@@ -94,6 +94,9 @@ jobs:
           curl -sL -o /tmp/dockle.deb "https://github.com/goodwithtech/dockle/releases/download/v${DOCKLE_VERSION}/dockle_${DOCKLE_VERSION}_Linux-64bit.deb"
           sudo dpkg -i /tmp/dockle.deb
 
+      - name: Install skopeo
+        run: sudo apt-get install -y skopeo
+
       # Every dynamic value here (especially matrix.recipe.resolved_ref, which
       # ultimately comes from an upstream git tag/branch) is passed via env, never
       # interpolated with ${{ }} directly into this script's text -- a `${{ }}`
@@ -105,22 +108,23 @@ jobs:
       # follows the same rule.
       - name: Build local candidate for this platform (never pushed until scans pass)
         env:
-          IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          OCI_DIR: build-output/${{ matrix.recipe.platform_slug }}.oci
           DOCKERFILE: ${{ matrix.recipe.dockerfile }}
           CONTEXT: ${{ matrix.recipe.context }}
           PLATFORM: ${{ matrix.recipe.platform }}
           BUILD_ARGS_JSON: ${{ toJson(matrix.recipe.build_args) }}
           IMAGE_DESCRIPTION: ${{ matrix.recipe.image_description }}
         run: |
+          mkdir -p build-output
           build_args=()
           while IFS='=' read -r kv; do
             [ -n "$kv" ] && build_args+=(--build-arg "$kv")
           done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$BUILD_ARGS_JSON")
           label_args=()
           [ -n "$IMAGE_DESCRIPTION" ] && label_args+=(--label "org.opencontainers.image.description=$IMAGE_DESCRIPTION")
-          docker buildx build --load --platform "$PLATFORM" "${build_args[@]}" "${label_args[@]}" \
+          docker buildx build --output "type=oci,dest=$OCI_DIR,tar=false" --platform "$PLATFORM" "${build_args[@]}" "${label_args[@]}" \
             -f "$DOCKERFILE" \
-            -t "$IMAGE_TAG" \
+            -t "local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}" \
             "$CONTEXT"
 
       # Tier 1 scanning (docs/THREAT_MODEL.md) -- against the local single-platform
@@ -136,16 +140,24 @@ jobs:
       # nothing secret is ever allowed inside an image, no exceptions).
       - name: Trivy scan (fails on CRITICAL/HIGH-with-a-fix, or any secret)
         env:
-          IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          OCI_DIR: build-output/${{ matrix.recipe.platform_slug }}.oci
         run: |
-          trivy image --scanners vuln --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed "$IMAGE_TAG"
-          trivy image --scanners secret --exit-code 1 "$IMAGE_TAG"
+          trivy image --input "$OCI_DIR" --scanners vuln --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed
+          trivy image --input "$OCI_DIR" --scanners secret --exit-code 1
+
+      - name: Convert to Docker-archive format for Dockle (Dockle cannot read OCI-layout images)
+        env:
+          OCI_DIR: build-output/${{ matrix.recipe.platform_slug }}.oci
+          DOCKER_TAR: build-output/${{ matrix.recipe.platform_slug }}.docker.tar
+          SCAN_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+        run: |
+          skopeo copy "oci:$OCI_DIR" "docker-archive:$DOCKER_TAR:$SCAN_TAG"
 
       - name: Dockle scan (fails on WARN or worse)
         env:
-          IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          DOCKER_TAR: build-output/${{ matrix.recipe.platform_slug }}.docker.tar
         run: |
-          dockle --exit-code 1 --exit-level WARN "$IMAGE_TAG"
+          dockle --exit-code 1 --exit-level WARN --input "$DOCKER_TAR"
 
       # Non-blocking Tier 1 reporting (docs/THREAT_MODEL.md): license scanning, an
       # SBOM, and a full unfiltered vulnerability report, for visibility -- no stated
@@ -156,27 +168,27 @@ jobs:
       # rather than just asserted in docs/THREAT_MODEL.md with nothing backing it.
       - name: Generate license report, SBOM, and full vulnerability report (non-blocking)
         env:
-          IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          OCI_DIR: build-output/${{ matrix.recipe.platform_slug }}.oci
           SLUG: ${{ matrix.recipe.platform_slug }}
         run: |
           mkdir -p reports
-          trivy image --scanners license --format json --output "reports/licenses-${SLUG}.json" "$IMAGE_TAG"
-          trivy image --format cyclonedx --output "reports/sbom-${SLUG}.cdx.json" "$IMAGE_TAG"
-          trivy image --scanners vuln --format json --output "reports/vulnerabilities-${SLUG}.json" "$IMAGE_TAG"
+          trivy image --input "$OCI_DIR" --scanners license --format json --output "reports/licenses-${SLUG}.json"
+          trivy image --input "$OCI_DIR" --format cyclonedx --output "reports/sbom-${SLUG}.cdx.json"
+          trivy image --input "$OCI_DIR" --scanners vuln --format json --output "reports/vulnerabilities-${SLUG}.json"
 
       # Same unfiltered vuln data as reports/vulnerabilities-${SLUG}.json above, just
       # rendered where a human actually looks first -- the run's own summary page --
       # instead of only inside a downloadable artifact zip.
       - name: Add vulnerability report to job summary
         env:
-          IMAGE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          OCI_DIR: build-output/${{ matrix.recipe.platform_slug }}.oci
           SLUG: ${{ matrix.recipe.platform_slug }}
         run: |
           {
             echo "### Vulnerability report -- ${{ matrix.recipe.name }} (${SLUG})"
             echo
             echo '```'
-            trivy image --scanners vuln --format table "$IMAGE_TAG"
+            trivy image --input "$OCI_DIR" --scanners vuln --format table
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -197,13 +209,13 @@ jobs:
       - name: Push arch-suffixed image
         id: push
         env:
-          SOURCE_TAG: local-candidate:${{ matrix.recipe.name }}-${{ matrix.recipe.platform_slug }}
+          OCI_DIR: build-output/${{ matrix.recipe.platform_slug }}.oci
+          IMAGE_NAME: ${{ matrix.recipe.image_name }}
           TARGET_TAG: ${{ matrix.recipe.image_name }}:${{ matrix.recipe.resolved_ref }}-${{ matrix.recipe.platform_slug }}
         run: |
-          docker tag "$SOURCE_TAG" "$TARGET_TAG"
-          docker push "$TARGET_TAG"
-          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$TARGET_TAG")"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          skopeo copy --format oci --authfile "$HOME/.docker/config.json" --digestfile digest.txt \
+            "oci:$OCI_DIR" "docker://$TARGET_TAG"
+          echo "digest=${IMAGE_NAME}@$(cat digest.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Record this platform's result for the manifest job
         env:
@@ -259,6 +271,7 @@ jobs:
             recipe_hash=$(jq -r '.recipe_hash' <<< "$recipe_json")
             image=$(jq -r '.image_name' <<< "$recipe_json")
             platforms=$(jq -r '.platforms[]' <<< "$recipe_json")
+            description=$(jq -r '.image_description' <<< "$recipe_json")
 
             digests=()
             complete=true
@@ -277,18 +290,14 @@ jobs:
               continue
             fi
 
-            # NOT annotated with org.opencontainers.image.description here, despite
-            # imagetools create supporting --annotation "index:...": this repo's own
-            # published manifests are Docker manifest-list media type (confirmed via
-            # imagetools inspect --raw against the real ghcr.io/zbalint/curated-
-            # technitium:v15.5.1), which has no annotations field at all -- OCI index
-            # is a different, separate media type. imagetools create silently no-ops
-            # the flag rather than erroring when given Docker-mediatype sources. Making
-            # this actually work needs the per-platform push step below switched from
-            # plain `docker push` to a buildx-native OCI-mediatype push -- not done in
-            # this change, see the memory linked to this recipe's description work.
+            # Per-platform pushes (build job's "Push arch-suffixed image" step) are now a
+            # direct skopeo copy from each platform's OCI-layout build output, so every
+            # digest here is OCI mediatype -- imagetools create therefore produces an OCI
+            # image index (not a Docker manifest list), which does support annotations.
+            annotation_args=()
+            [ -n "$description" ] && annotation_args+=(--annotation "index:org.opencontainers.image.description=$description")
             echo "$name: all platforms passed, assembling manifest for $image:$ref"
-            docker buildx imagetools create -t "$image:$ref" "${digests[@]}"
+            docker buildx imagetools create -t "$image:$ref" "${annotation_args[@]}" "${digests[@]}"
             manifest_digest=$(docker buildx imagetools inspect "$image:$ref" --format '{{json .Manifest}}' | jq -r '.digest')
 
             jq -n --arg ref "$ref" --arg digest "$manifest_digest" --arg hash "$recipe_hash" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
