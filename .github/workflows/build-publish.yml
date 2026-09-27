@@ -265,7 +265,7 @@ jobs:
         run: |
           mkdir -p state-updates
           echo "$RECIPES_JSON" > recipes.json
-          for recipe_json in $(jq -c '.[]' recipes.json); do
+          while IFS= read -r recipe_json; do
             name=$(jq -r '.name' <<< "$recipe_json")
             ref=$(jq -r '.resolved_ref' <<< "$recipe_json")
             recipe_hash=$(jq -r '.recipe_hash' <<< "$recipe_json")
@@ -303,7 +303,7 @@ jobs:
             jq -n --arg ref "$ref" --arg digest "$manifest_digest" --arg hash "$recipe_hash" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               '{last_built_ref: $ref, last_built_digest: $digest, last_built_recipe_hash: $hash, last_built_at: $at}' \
               > "state-updates/${name}.json"
-          done
+          done < <(jq -c '.[]' recipes.json)
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: hashFiles('state-updates/*.json') != ''
