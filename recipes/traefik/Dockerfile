@@ -61,8 +61,21 @@ RUN yarn tsc && yarn lint && yarn build
 
 # ---- go-builder: compiles the traefik binary itself, CGO_ENABLED=0 (upstream's own
 # Makefile `binary` target already builds this way -- a fully static binary is why
-# distroless/static, not distroless/base, is the correct final base here).
-FROM golang:1.26-alpine3.22 AS go-builder
+# distroless/static, not distroless/base, is the correct final base here). This stage
+# is fully discarded (only the compiled /out/traefik binary is copied out below), so
+# its own OS/Alpine version has no bearing on the final image or its scan results --
+# only the Go toolchain version matters, since CVE fixes in crypto/tls etc. get
+# compiled directly into the static binary. Deliberately not pinned to an Alpine point
+# release here (unlike the webui-builder stage, which pins alpine3.22 on purpose to
+# match upstream's own build image): confirmed via Docker Hub's API that golang's
+# "1.26-alpine3.22" tag is frozen at Go 1.26.4 (Alpine stopped getting new 1.26.x
+# builds after that patch) -- a pinned Alpine suffix on a discarded builder stage can
+# silently freeze the Go patch version and reintroduce fixed CVEs (this is what broke
+# the build: Trivy's real CI log showed 9 HIGH stdlib CVEs against "Installed Version:
+# v1.26.4", e.g. CVE-2026-56862 (crypto/tls KeyUpdate DoS), all fixed by Go 1.26.6 at
+# the latest, but 1.26-alpine3.22 never moved past 1.26.4). The floating "-alpine" tag
+# always tracks the newest point release for this Go minor version.
+FROM golang:1.26-alpine AS go-builder
 
 WORKDIR /src
 COPY --from=source /src/ .
