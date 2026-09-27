@@ -17,9 +17,17 @@
 # libmsquic (DNS-over-QUIC) is included for feature parity with upstream's own image,
 # installed the same way upstream's own Dockerfile does it (Microsoft's Ubuntu 24.04
 # package repo). Validated: correct files present, full shared-library dependency chain
-# resolved (libcrypto.so.3/libnuma.so.1), clean startup -- not validated: an actual live
-# DoQ handshake (Technitium's DoQ listener needs a TLS cert configured via its own web
-# console/API, not an env var; out of scope for this build-time verification).
+# resolved (libcrypto.so.3/libnuma.so.1), clean startup, plain DNS resolution and
+# non-QUIC forwarders all work correctly.
+#
+# 2026-09-27 CONFIRMED BUG (arm64 only, real hardware): a DoQ upstream forwarder
+# crashes the process with SIGABRT the moment a query hits the QUIC path. Root-caused
+# via A/B test against stock upstream technitium/dns-server:latest on the same board
+# and same config volume -- it crashes identically, proving this is an upstream
+# msquic/OpenSSL bug on aarch64 (see recipe.yaml's platforms comment for the full
+# writeup and the matching upstream issue), not something this Dockerfile's hardening
+# introduced. No workaround on this recipe's side; needs an upstream msquic/OpenSSL
+# fix. Not yet confirmed whether amd64 shares this bug.
 
 # ---- builder ----
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS builder

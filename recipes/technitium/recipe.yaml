@@ -30,22 +30,36 @@ image:
   description: >-
     Hardened, distroless build of Technitium DNS Server, compiled from source. Runs
     fully non-root with a single NET_BIND_SERVICE capability instead of root, on
-    Ubuntu Chiseled with no shell or package manager at runtime. Full feature parity
-    with upstream, including DNS-over-QUIC (libmsquic). Multi-arch (amd64/arm64).
-    Trivy+Dockle scanned on every build -- see the workflow run's summary/artifacts
-    for the current report.
+    Ubuntu Chiseled with no shell or package manager at runtime. Feature parity with
+    upstream, including DNS-over-QUIC (libmsquic) -- KNOWN ISSUE: DoQ upstream
+    forwarders crash the process on arm64 (see runtime.gvisor_tested comment and
+    build.dockerfile's own comment below); all other functionality, including plain
+    DNS and non-QUIC forwarders, is unaffected. Multi-arch (amd64/arm64). Trivy+Dockle
+    scanned on every build -- see the workflow run's summary/artifacts for the
+    current report.
   platforms:
     - linux/amd64
     - linux/arm64
     # arm64 because a real known deployment target for Technitium is arm64 hardware
     # (confirmed via that hardware's own apt config, 2026-09-26) already running
     # Technitium today. Base image + libmsquic apt repo both confirmed to publish
-    # arm64 variants (docker manifest inspect / apt Packages index) -- not yet
-    # validated with an actual end-to-end arm64 build+run: this dev box's
-    # userns-remap config is incompatible with --privileged, which blocks
-    # registering QEMU locally. The real validation is the first GitHub Actions run
-    # (standard runners, no userns-remap) or testing directly on real arm64
-    # hardware later.
+    # arm64 variants (docker manifest inspect / apt Packages index).
+    #
+    # 2026-09-27 CONFIRMED BUG on real arm64 hardware (Radxa Zero 3E, DietPi): a DoQ
+    # (DNS-over-QUIC) upstream forwarder crashes the process with SIGABRT (exit 134)
+    # the moment a query actually exercises the QUIC path -- reported via a live
+    # crash-loop on zbalint's homelab DNS board. Root-caused via a controlled A/B
+    # test: stock upstream technitium/dns-server:latest, run against the exact same
+    # named config volume on the exact same board, crashes identically. This proves
+    # it is an upstream msquic/OpenSSL bug on aarch64, NOT something this recipe's
+    # hardening (capabilities, read-only rootfs, chiseled base, ld.so.cache setup)
+    # introduced -- matches known upstream reports, e.g. microsoft/msquic#5210
+    # (aarch64 + OpenSSL crashing in the QUIC handshake's mutex handling). Plain DNS
+    # resolution and non-QUIC forwarders (DoH/DoT/UDP) are unaffected. No known
+    # workaround on this recipe's side today -- the fix, if any, has to land
+    # upstream in msquic/OpenSSL. Full investigation: SALTMDB memory (see recipe
+    # README). Not yet confirmed whether amd64 shares this bug -- the only report so
+    # far is on real arm64 hardware.
 
 build:
   dockerfile: Dockerfile
