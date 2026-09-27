@@ -1,0 +1,53 @@
+name: traefik
+description: >
+  Traefik reverse proxy, compiled from source (Go binary + the webui dashboard's own
+  frontend build) running as the repo-wide fixed non-root identity (65532:65532) on
+  gcr.io/distroless/static-debian12, with a build-time NET_BIND_SERVICE file
+  capability to bind ports 80/443 without root. Adapted from
+  prototype/traefik-hardened-build; see that branch's README for the full
+  webui-embed/build investigation this recipe carries forward.
+
+upstream:
+  repository: https://github.com/traefik/traefik.git
+  tracking:
+    mode: github_release
+    # traefik publishes formal GitHub Releases, so the Releases API resolves the
+    # newest version directly (confirmed: v3.7.13 as of this recipe's authoring).
+
+image:
+  name: ghcr.io/zbalint/curated-traefik
+  description: >-
+    Hardened, distroless build of Traefik, compiled from source including its own
+    webui dashboard frontend. Runs fully non-root with a single NET_BIND_SERVICE
+    capability instead of root, on Google's distroless/static base with no shell or
+    package manager at runtime. Trivy+Dockle scanned on every build -- see the
+    workflow run's summary/artifacts for the current report.
+  platforms:
+    - linux/amd64
+    # arm64 deliberately not declared yet -- no confirmed real deployment target for
+    # Traefik on ARM hardware exists today (unlike recipes/technitium, whose arm64
+    # target is the homelab's real Radxa DNS board fleet). Add a platforms entry here
+    # once/if that changes; nothing else about this recipe needs to change to support
+    # it (distroless/static-debian12 and gcr.io/distroless base images both publish
+    # arm64 variants).
+
+build:
+  dockerfile: Dockerfile
+  args:
+    TRAEFIK_VERSION: "${resolved_ref}"
+
+runtime:
+  base: distroless
+  # gcr.io/distroless/static-debian12:nonroot -- Google's distroless-static base,
+  # correct choice (vs. distroless/base) because Traefik builds CGO_ENABLED=0 as a
+  # fully static binary, same as upstream's own Makefile `binary` target. Verified
+  # directly (docker create + extract) that this base's own /etc/passwd already
+  # contains `nonroot:x:65532:65532:nonroot:/home/nonroot:/sbin/nologin` -- this
+  # recipe needs zero hand-authored passwd/group rootfs files, unlike
+  # recipes/technitium's chiseled base. Also verified present out of the box: a full
+  # ca-certificates.crt bundle and complete tzdata/zoneinfo tree.
+  gvisor_tested: false
+  # Not yet validated -- this recipe is being pushed for GitHub Actions's runners (far more
+  # RAM than the local dev box) to build for real, without local resource-constrained
+  # workarounds. gVisor validation is still owed before this recipe is considered fully
+  # graduated; do it against the actual CI-built image, not a local one.
