@@ -28,7 +28,7 @@ docker run -d --name technitium \
   -p 5380:5380/tcp \
   --user 65532:65532 \
   --cap-drop ALL --cap-add NET_BIND_SERVICE \
-  --read-only --tmpfs /tmp \
+  --read-only --tmpfs /tmp:exec \
   -v technitium-data:/etc/dns \
   ghcr.io/zbalint/curated-technitium:<tag>
 ```
@@ -39,6 +39,11 @@ docker run -d --name technitium \
   (see the recipe's own commit history / SALTMDB for the underlying finding).
 - `/etc/dns` is the only writable path — everything else is read-only rootfs. Config,
   zones, logs, blocklist cache, and dashboard stats all live under it.
+- `--tmpfs /tmp:exec` needs the explicit `:exec`: Docker mounts tmpfs `noexec` by
+  default, and Technitium apps that ship native code (e.g. Query Logs (Sqlite)) extract
+  their library to `/tmp` and `dlopen` it, which a `noexec` mount refuses -- surfacing
+  as `The type initializer for 'Microsoft.Data.Sqlite.SqliteConnection' threw an
+  exception`. In compose: `tmpfs: - /tmp:exec`.
 - Web console: `http://<host>:5380/`. Ports `853` (DoT/DoQ), `443`/`80`/`8053` (DoH),
   `53443` (web console HTTPS), and `67/udp` (DHCP, unexercised by this recipe) are also
   `EXPOSE`d if needed.
