@@ -1,6 +1,6 @@
 {
-  "last_built_ref": "v15.6.1",
-  "last_built_digest": "sha256:dbc215e7035e9b24c4ec78719a7608ca40d636755bd2317e7cd9c68d65ce97a8",
+  "last_built_ref": "v15.6.2",
+  "last_built_digest": "sha256:24fb5afeb65584999bea7b1215f16ae48f7e2b5f38974a99a4b8a01dd59be220",
   "last_built_recipe_hash": "2c12872f81d66a68deec381a34ba530aab605ad10b6f0b6b5c9f9eae8c044753",
-  "last_built_at": "2026-10-12T14:15:54Z"
+  "last_built_at": "2026-10-19T11:56:22Z"
 }
